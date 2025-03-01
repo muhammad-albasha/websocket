@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const express = require('express');
 const WebSocket = require('ws');
 const https = require('https');
@@ -8,11 +10,11 @@ const jwt = require('jsonwebtoken');
 const app = express();
 const port = process.env.PORT || 5300;
 
-// SSL certificate and key paths
+// SSL certificate and key paths from .env
 const options = {
-    cert: fs.readFileSync('/etc/acme-bu/public/.cert'),
-    key: fs.readFileSync('/etc/acme-bu/private/.key'),
-    ca: fs.readFileSync('/etc/acme-bu/public/.fullchain')
+    cert: fs.readFileSync(process.env.SSL_CERT_PATH),
+    key: fs.readFileSync(process.env.SSL_KEY_PATH),
+    ca: fs.readFileSync(process.env.SSL_CA_PATH),
 };
 
 // HTTPS server
@@ -20,17 +22,56 @@ const server = https.createServer(options, app);
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Simple route for testing HTTPS
+// Read the maximum WebSocket servers from .env (defaults to 17 if not set)
+const maxWebSocketServers = parseInt(process.env.MAX_WEBSOCKET_SERVERS, 10) || 17;
+
+// Logs for WebSocket data
+let wsLogs = {};
+
+// Initialize log storage dynamically for 0..40
+for (let i = 0; i <= 40; i++) {
+    wsLogs[`ws${i}`] = [];
+}
+
+// WebSocket server map (for the main /ws routes)
+const wsServers = {};
+
+// Create a separate log server for `/test-logs`
+const logServer = new WebSocket.Server({ noServer: true });
+
+// Broadcast all logs to every connected client
+function broadcastLogs() {
+    const logs = JSON.stringify(wsLogs);
+
+    // Broadcast to every WS server route
+    Object.values(wsServers).forEach((server) => {
+        server.clients.forEach((client) => {
+            if (client.readyState === WebSocket.OPEN) {
+                client.send(logs);
+            }
+        });
+    });
+
+    // Also broadcast to the /test-logs server
+    logServer.clients.forEach((client) => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(logs);
+        }
+    });
+}
+
+// Serve the test HTML page
+// This file (test.html) should exist in the "public" folder
 app.get('/test', (req, res) => {
-    res.send("HTTPS is working!");
+    res.sendFile(path.join(__dirname, 'public', 'test.html'));
 });
 
 server.listen(port, () => {
     console.log(`Server started on https://localhost:${port}`);
 });
 
-// Secret key for JWT
-const secretKey = 'secure_key'; // Must be at least 32 characters long
+// Secret key for JWT (must be at least 32 characters long)
+const secretKey = process.env.JWT_SECRET_KEY;
 
 // Middleware function to verify JWT from the query string with clock tolerance
 function verifyJWT(request, socket) {
@@ -45,7 +86,6 @@ function verifyJWT(request, socket) {
     }
 
     try {
-        // Verify the token with a clock tolerance of 60 seconds
         jwt.verify(token, secretKey, { clockTolerance: 60 }); // 60 seconds tolerance
         return true;
     } catch (error) {
@@ -56,91 +96,82 @@ function verifyJWT(request, socket) {
     }
 }
 
-// WebSocket server instances for /ws/ws1 and /ws/ws2
-const wss1 = new WebSocket.Server({ noServer: true });
-const wss2 = new WebSocket.Server({ noServer: true });
+// Create WebSocket servers dynamically for /ws/ws0..wsX
+for (let i = 0; i <= maxWebSocketServers; i++) {
+    const route = `ws${i}`;
+    const wss = new WebSocket.Server({ noServer: true });
+    wsServers[route] = wss;
 
-// Broadcast function to send a message to all connected clients
-function broadcastMessage(server, message) {
-    server.clients.forEach((client) => {
-        if (client.readyState === WebSocket.OPEN) {
-            client.send(message);
-        }
+    wss.on('connection', (ws) => {
+        console.log(`New client connected to /ws/${route}`);
+
+        ws.on('message', (data) => {
+            const isBinary = data instanceof Buffer;
+            const message = isBinary ? 'Binary data' : data.toString();
+            console.log(`Data received on ${route}:`, message);
+
+            // Save "received" data to logs
+            wsLogs[route].push({ type: 'received', data: message });
+            if (wsLogs[route].length > 50) wsLogs[route].shift(); // keep logs small
+
+            // Broadcast this message to everyone on the same route
+            wss.clients.forEach((client) => {
+                if (client.readyState === WebSocket.OPEN) {
+                    client.send(data, { binary: isBinary });
+                }
+            });
+
+            // Save "broadcast" event to logs
+            wsLogs[route].push({ type: 'broadcast', data: message });
+
+            // Now broadcast updated logs to all watchers
+            broadcastLogs();
+        });
+
+        ws.on('close', () => {
+            console.log(`Client disconnected from /ws/${route}`);
+        });
+
+        ws.on('error', (error) => {
+            console.error(`WebSocket error on ${route}:`, error);
+        });
     });
 }
 
-// Handle connections to /ws/ws1
-wss1.on('connection', (ws) => {
-    console.log('New client connected to /ws/ws1');
-
-    ws.on('message', (data) => {
-        const isBinary = data instanceof Buffer;
-        console.log('Data received on ws1:', isBinary ? 'Binary data' : data);
-
-        // Broadcast the message to all clients connected to wss1
-        wss1.clients.forEach((client) => {
-            if (client.readyState === WebSocket.OPEN) {
-                client.send(data, { binary: isBinary });
-            }
-        });
-    });
-
-    ws.on('close', () => {
-        console.log('Client disconnected from /ws/ws1');
-    });
-
-    ws.on('error', (error) => {
-        console.error('WebSocket error on ws1:', error);
-    });
+// Listen for connections to /test-logs
+logServer.on('connection', (ws) => {
+    console.log('New client connected to /test-logs');
+    // Immediately send the current logs upon connection
+    ws.send(JSON.stringify(wsLogs));
 });
 
-// Handle connections to /ws/ws2
-wss2.on('connection', (ws) => {
-    console.log('New client connected to /ws/ws2');
-
-    ws.on('message', (data) => {
-        const isBinary = data instanceof Buffer;
-        console.log('Data received on ws2:', isBinary ? 'Binary data' : data);
-
-        // Broadcast the message to all clients connected to wss2
-        wss2.clients.forEach((client) => {
-            if (client.readyState === WebSocket.OPEN) {
-                client.send(data, { binary: isBinary });
-            }
-        });
-    });
-
-    ws.on('close', () => {
-        console.log('Client disconnected from /ws/ws2');
-    });
-
-    ws.on('error', (error) => {
-        console.error('WebSocket error on ws2:', error);
-    });
-});
-
-// Handle WebSocket upgrades for /ws/ws1 and /ws/ws2
+// Handle WebSocket upgrades
 server.on('upgrade', (request, socket, head) => {
-    console.log(`Upgrade request received: URL = ${request.url}`);
+    const url = request.url.split('?')[0];
 
-    // Verify the JWT before upgrading the connection
-    if (!verifyJWT(request, socket)) {
-        return; // End the connection if JWT verification fails
-    }
-
-    if (request.url.startsWith('/ws/ws1')) {
-        console.log("Matching WebSocket route /ws/ws1 - proceeding with upgrade.");
-        wss1.handleUpgrade(request, socket, head, (ws) => {
-            wss1.emit('connection', ws, request);
-        });
-    } else if (request.url.startsWith('/ws/ws2')) {
-        console.log("Matching WebSocket route /ws/ws2 - proceeding with upgrade.");
-        wss2.handleUpgrade(request, socket, head, (ws) => {
-            wss2.emit('connection', ws, request);
+    if (url === '/test-logs') {
+        // Upgrade to the logServer
+        logServer.handleUpgrade(request, socket, head, (ws) => {
+            logServer.emit('connection', ws, request);
         });
     } else {
-        console.log(`Invalid WebSocket route: ${request.url} - sending 404 response.`);
-        socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
-        socket.destroy();
+        // Check if the upgrade is for /ws/wsX
+        const match = url.match(/^\/ws\/(ws[0-9]+)$/);
+        if (match) {
+            const route = match[1];
+            if (wsServers[route]) {
+                // Secure connection with JWT
+                if (!verifyJWT(request, socket)) return;
+                wsServers[route].handleUpgrade(request, socket, head, (ws) => {
+                    wsServers[route].emit('connection', ws, request);
+                });
+            } else {
+                socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+                socket.destroy();
+            }
+        } else {
+            socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+            socket.destroy();
+        }
     }
 });

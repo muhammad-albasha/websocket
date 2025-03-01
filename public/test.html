@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>WebSocket Radar Points</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: #000; /* black background */
+      }
+      body {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        font-family: Arial, sans-serif;
+        color: #0f0; /* radar-green text by default */
+      }
+
+      .radar-container {
+        position: relative;
+        width: 600px;
+        height: 600px;
+        border-radius: 50%;
+        background: radial-gradient(circle at center, #002200 0%, #000 80%);
+        box-shadow: 0 0 20px rgba(0, 255, 0, 0.3);
+        overflow: hidden;
+      }
+
+      /* Concentric circles (lines) */
+      .radar-container::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: 50%;
+        pointer-events: none;
+        background: repeating-radial-gradient(
+          circle at center,
+          transparent 0 29px,
+          rgba(0, 255, 0, 0.3) 30px 31px
+        );
+      }
+
+      /* Radar sweep line */
+      .radar-container::after {
+        content: "";
+        position: absolute;
+        left: 50%;
+        top: 0;
+        height: 50%;
+        width: 2px;
+        background: rgba(0, 255, 0, 0.7);
+        transform-origin: bottom center;
+        animation: radar-sweep 2s linear infinite;
+      }
+      @keyframes radar-sweep {
+        0% {
+          transform: translateX(-50%) rotate(0deg);
+        }
+        100% {
+          transform: translateX(-50%) rotate(360deg);
+        }
+      }
+
+      /* Container for the dots and labels */
+      .dot-container {
+        position: absolute;
+        inset: 0; /* fill the radar-container */
+      }
+
+      /* Each route is shown as a small green dot */
+      .wsDot {
+        position: absolute;
+        width: 12px;
+        height: 12px;
+        background-color: #0f0;
+        border-radius: 50%;
+        transform: translate(-50%, -50%);
+        box-shadow: 0 0 6px rgba(0, 255, 0, 0.8);
+      }
+
+      /* Label for each dot (route name) */
+      .wsLabel {
+        position: absolute;
+        color: #0f0;
+        font-size: 12px;
+        white-space: nowrap;
+        /* Adjust the transform so label doesn't overlap the dot */
+        transform: translate(-50%, -50%) translateX(20px);
+        /* pointer-events: none makes the label “click-through” (optional) */
+        pointer-events: none;
+      }
+
+      /* Inactive message if no new data arrives */
+      #inactiveMsg {
+        position: absolute;
+        top: 50%;
+        left: 53%;
+        width: 60%;
+        transform: translateX(-50%);
+        color: red;
+        font-weight: bold;
+        display: none; /* hidden by default */
+      }
+    </style>
+  </head>
+  <body>
+    <div class="radar-container">
+      <div class="dot-container" id="dotContainer"></div>
+      <div id="inactiveMsg">No new data received in the last 1 second!</div>
+    </div>
+
+    <script>
+      // Build the correct ws:// or wss:// URL
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const wsUrl = protocol + "//" + window.location.host + "/test-logs";
+      const socket = new WebSocket(wsUrl);
+
+      // Idle detection threshold
+      let lastUpdateTime = Date.now();
+      const idleThreshold = 1000; // 1 second
+
+      // Check every 500 ms whether we haven't received data for >1 second
+      setInterval(() => {
+        const now = Date.now();
+        if (now - lastUpdateTime > idleThreshold) {
+          clearDots();
+        }
+      }, 500);
+
+      function clearDots() {
+        // Remove all dots & labels
+        document.getElementById("dotContainer").innerHTML = "";
+        // Show inactivity message
+        document.getElementById("inactiveMsg").style.display = "block";
+      }
+
+      function hideInactiveMsg() {
+        document.getElementById("inactiveMsg").style.display = "none";
+      }
+
+      socket.onopen = () => {
+        console.log("Connected to /test-logs WebSocket");
+      };
+
+      socket.onmessage = (event) => {
+        // Update last received time
+        lastUpdateTime = Date.now();
+        hideInactiveMsg();
+
+        // data is an object like { ws0: [...], ws1: [...], ... }
+        const data = JSON.parse(event.data);
+
+        // Clear existing dots
+        const dotContainer = document.getElementById("dotContainer");
+        dotContainer.innerHTML = "";
+
+        // Filter routes that actually have log entries
+        const activeRoutes = Object.entries(data)
+          .filter(([_, logs]) => logs.length > 0)
+          .map(([route]) => route);
+
+        if (activeRoutes.length === 0) {
+          // If no active routes, no dots to show
+          return;
+        }
+
+        // We place each route's dot at an evenly spaced angle
+        const centerX = 300; // half of radar-container's 600px width
+        const centerY = 300; // half of radar-container's 600px height
+        const radius = 200; // distance from center for the dots
+
+        activeRoutes.forEach((route, index) => {
+          // Unique angle for this route, evenly spaced
+          const angle = ((2 * Math.PI) / activeRoutes.length) * index;
+          const x = centerX + radius * Math.cos(angle);
+          const y = centerY + radius * Math.sin(angle);
+
+          // Create the dot
+          const dot = document.createElement("div");
+          dot.classList.add("wsDot");
+          dot.title = route; // tooltip on hover
+          dot.style.left = x + "px";
+          dot.style.top = y + "px";
+          dotContainer.appendChild(dot);
+
+          // Create a label with the route name
+          const label = document.createElement("div");
+          label.classList.add("wsLabel");
+          label.style.left = x + "px";
+          label.style.top = y + "px";
+          label.textContent = route;
+          dotContainer.appendChild(label);
+        });
+      };
+
+      socket.onclose = () => {
+        console.log("Disconnected from /test-logs WebSocket");
+      };
+
+      socket.onerror = (error) => {
+        console.error("WebSocket error:", error);
+      };
+    </script>
+  </body>
+</html>
